@@ -1,0 +1,19 @@
+[package]
+name = "makemp4"
+version = "0.1.0"
+description = "makemp4"
+authors = ["ProfiiDev <92174452+Profiidev@users.noreply.github.com>"]
+license = "MIT"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.29.0"
+ratatui = "0.29.0"
+color-eyre = "0.6.3"
+
+# Read the optimization guideline for more details: https://ratatui.rs/recipes/apps/release-your-app/#optimizations
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
