@@ -1,6 +1,14 @@
-use std::{fs, process::Command};
+use std::{
+  fs,
+  io::{BufRead, BufReader},
+  process::{Command, Stdio},
+  sync::{Arc, Mutex},
+};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, bail};
+use ratatui::widgets::ListState;
+
+use crate::state::AppState;
 
 pub fn find_drives() -> Result<Vec<String>> {
   let entries = fs::read_dir("/dev")?;
@@ -16,12 +24,14 @@ pub fn find_drives() -> Result<Vec<String>> {
   Ok(drives)
 }
 
+#[allow(unused)]
 struct CInfo {
   id: u32,
   code: u32,
   value: String,
 }
 
+#[allow(unused)]
 struct TInfo {
   id: u32,
   code: u32,
@@ -29,11 +39,13 @@ struct TInfo {
   value: String,
 }
 
+#[derive(Clone)]
 pub struct DiskInfo {
   pub title: String,
   pub titles: Vec<DiskTitle>,
 }
 
+#[derive(Clone)]
 pub struct DiskTitle {
   pub id: u32,
   pub name: String,
@@ -59,7 +71,7 @@ pub fn find_disk_titles(drive: &str) -> Result<DiskInfo> {
       if parts.len() >= 3 {
         let id = parts[0].parse::<u32>().unwrap_or(0);
         let code = parts[1].parse::<u32>().unwrap_or(0);
-        let value = parts[2..].join(",");
+        let value = parts[2..].join(",").replace("\"", "");
         cinfos.push(CInfo { id, code, value });
       }
     } else if line.starts_with("TINFO:") {
@@ -72,7 +84,7 @@ pub fn find_disk_titles(drive: &str) -> Result<DiskInfo> {
         let id = parts[0].parse::<u32>().unwrap_or(0);
         let code = parts[1].parse::<u32>().unwrap_or(0);
         let some_id = parts[2].parse::<u32>().unwrap_or(0);
-        let value = parts[3..].join(",");
+        let value = parts[3..].join(",").replace("\"", "");
 
         if tinfos.len() <= id as usize {
           tinfos.push(Vec::new());
@@ -132,6 +144,120 @@ pub fn find_disk_titles(drive: &str) -> Result<DiskInfo> {
   }
 
   info.titles.sort_unstable_by_key(|t| t.size_bytes);
+  info.titles.reverse();
 
   Ok(info)
+}
+
+pub fn extract_title(
+  drive: &str,
+  title_id: u32,
+  output_path: &str,
+  state: Arc<Mutex<AppState>>,
+) -> Result<()> {
+  let mut child = Command::new("makemkvcon")
+    .args([
+      "-r",
+      "mkv",
+      "--progress=/dev/stdout",
+      &format!("dev:{}", drive),
+      &format!("{}", title_id),
+      output_path,
+    ])
+    .stdout(Stdio::piped())
+    .spawn()?;
+
+  let stdout = child.stdout.take().unwrap();
+  let reader = BufReader::new(stdout);
+
+  for line in reader.lines() {
+    let line = line?;
+
+    if line.starts_with("PRGC:") {
+      let parts: Vec<&str> = line
+        .strip_prefix("PRGC:")
+        .unwrap_or("")
+        .split(',')
+        .collect();
+      if parts.len() < 3 {
+        continue;
+      }
+      let title = parts[2].replace("\"", "");
+      let mut state = state.lock().unwrap();
+      if let AppState::TitleExtracting {
+        title_id,
+        total,
+        extracted,
+        drive,
+        disk_info,
+        ..
+      } = &*state
+      {
+        *state = AppState::TitleExtracting {
+          drive: drive.to_string(),
+          title_id: *title_id,
+          total: *total,
+          extracted: *extracted,
+          task: title,
+          disk_info: disk_info.clone(),
+        };
+      }
+    }
+
+    if !line.starts_with("PRGV:") {
+      continue;
+    }
+    let parts: Vec<&str> = line
+      .strip_prefix("PRGV:")
+      .unwrap_or("")
+      .split(',')
+      .collect();
+    if parts.len() < 3 {
+      continue;
+    }
+
+    let extracted = parts[0].parse::<u32>().unwrap_or(0);
+    let total = parts[2].parse::<u32>().unwrap_or(0);
+    let mut state = state.lock().unwrap();
+    if let AppState::TitleExtracting {
+      drive,
+      title_id,
+      task,
+      disk_info,
+      ..
+    } = &*state
+    {
+      *state = AppState::TitleExtracting {
+        drive: drive.to_string(),
+        title_id: *title_id,
+        total,
+        extracted,
+        task: task.to_string(),
+        disk_info: disk_info.clone(),
+      };
+    }
+  }
+
+  let status = child.wait()?;
+  if !status.success() {
+    bail!("makemkvcon failed with status: {}", status);
+  }
+
+  let mut state = state.lock().unwrap();
+  let disk_info = if let AppState::TitleExtracting { disk_info, .. } = &*state {
+    disk_info.clone()
+  } else {
+    DiskInfo {
+      title: "Unknown".to_string(),
+      titles: Vec::new(),
+    }
+  };
+  *state = AppState::Done {
+    drive: drive.to_string(),
+    title_id,
+    disk_info,
+    selected: ListState::default().with_selected(Some(0)),
+  };
+
+  Ok(())
 }

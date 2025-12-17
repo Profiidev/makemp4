@@ -3,6 +3,7 @@ use crate::app::App;
 mod app;
 mod makemkv;
 mod state;
+mod tmdb;
 
 fn main() -> color_eyre::Result<()> {
   color_eyre::install()?;
